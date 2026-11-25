@@ -6,47 +6,43 @@ has to stay on.
 
 ```
 Blupath API ──(23:00 SAST, Azure Function timer)──► SharePoint: "Blupath Data Lake/"
-                                                     ├─ raw/loads/YYYY/MM/DD/loads_<time>.json      untouched API data
-                                                     ├─ curated/loads/YYYY/MM/DD/loads_<date>.parquet  loads changed that day
-                                                     ├─ gold/loads_master.parquet                    one row per load (latest)
-                                                     ├─ gold/loads_master.csv                        same, for Excel / Power BI
-                                                     └─ _state/watermark.json, run_log.csv           run tracking
+                                                     ├─ raw/loads/YYYY/MM/DD/loads_<time>.json.gz       exact API reply per run
+                                                     ├─ curated/loads/pickup_month=YYYY-MM/loads.parquet loads by first-pickup month
+                                                     ├─ gold/loads_master.parquet / .csv               one row per load (latest version)
+                                                     ├─ gold/load_stops.parquet / .csv                 one row per stop, actual arrival/departure
+                                                     └─ _state/run_log.csv                              loads fetched per night
 ```
 
-**How the daily run works**
-- It fetches loads *updated* since the last successful run, with a 24-hour overlap so late changes
-  aren't missed. The first run pulls the last 30 days. Use a backfill for older history.
-- Each load is flattened (`origin.city` becomes `origin_city`; lists become JSON text) and upserted
-  into the master by its load ID, so a load that changes status is updated rather than duplicated.
-- The watermark only moves forward after all files are written, so a failed night is picked up the next night.
+**The Blupath API** (same call as the Power BI query):
+`POST https://portal.blupath.com/fireWorkFlow` with headers `service: BlupathService`,
+`operation: GatewayService.exportLoads` and `accessToken`, and body `{"dateFrom": "YYYY-MM-DD", "dateTo": "YYYY-MM-DD"}`.
+The dates filter on the **first pickup planned date**. The reply is `{"response": "ok", "result": [...]}`.
+`blupathId` is the unique load key.
+
+**How the nightly run works**
+- Blupath has no "last updated" filter, and loads keep changing after pickup (status, POD,
+  invoice). So every night re-pulls all loads with first pickup from **60 days ago to 30 days ahead**
+  and updates the lake. A load that moves from planned to completed is updated, not duplicated.
+- Requests are split into 31-day chunks. A 30-day chunk takes about 17 seconds.
+- Nested fields: `stopActualTimes` becomes the `load_stops` table. Lists such as
+  `pickupReferenceNumbers` are kept as JSON text in the master.
+- Loads that have been deleted in Blupath remain in the lake with their last known values.
 - The schedule is `0 0 21 * * *` (21:00 UTC). South Africa has no daylight saving, so this is always 23:00 SAST.
 
-## 1. Connect to the Blupath API
-
-All API details are settings, so no code changes are needed:
+## 1. Settings
 
 | Setting | Meaning | Default |
 |---|---|---|
-| `BLUPATH_BASE_URL` | e.g. `https://api.blupath.co.za` | *required* |
-| `BLUPATH_LOADS_PATH` | loads endpoint | `/loads` |
-| `BLUPATH_AUTH_TYPE` | `bearer`, `header`, `query`, `basic` or `none` | `bearer` |
-| `BLUPATH_API_KEY` | API key or token (store in Key Vault) | |
-| `BLUPATH_API_KEY_HEADER` / `BLUPATH_API_KEY_PARAM` | header or query name for `header`/`query` auth | `x-api-key` / `api_key` |
-| `BLUPATH_USERNAME` / `BLUPATH_PASSWORD` | for `basic` auth | |
-| `BLUPATH_FROM_PARAM` / `BLUPATH_TO_PARAM` | date-filter query params (blank = not sent) | `updatedFrom` / `updatedTo` |
-| `BLUPATH_DATE_FORMAT` | `iso` or `date` | `iso` |
-| `BLUPATH_PAGINATION` | `page`, `offset`, `cursor`, `next_link` or `none` | `page` |
-| `BLUPATH_PAGE_PARAM`, `BLUPATH_PAGE_START`, `BLUPATH_PAGE_SIZE_PARAM`, `BLUPATH_PAGE_SIZE` | paging params | `page`, `1`, `pageSize`, `500` |
-| `BLUPATH_CURSOR_PARAM` / `BLUPATH_CURSOR_KEY` / `BLUPATH_NEXT_LINK_KEY` | for cursor or next-link paging (keys are dotted paths, e.g. `meta.next`) | |
-| `BLUPATH_RECORDS_KEY` | where the list of loads sits in the response (dotted path; blank if the response is a list) | `data` |
-| `BLUPATH_ID_FIELD` | unique load ID column, after flattening | `id` |
-| `BLUPATH_EXTRA_PARAMS` | any fixed params as JSON, e.g. `{"status":"all"}` | `{}` |
-| `LAKE_LOOKBACK_HOURS` / `LAKE_INITIAL_LOOKBACK_DAYS` | overlap per run / first-run history | `24` / `30` |
+| `BLUPATH_ACCESS_TOKEN` | Blupath access token (store in Key Vault) | *required* |
+| `BLUPATH_URL` | gateway URL | `https://portal.blupath.com/fireWorkFlow` |
+| `BLUPATH_SERVICE` / `BLUPATH_OPERATION` | gateway headers | `BlupathService` / `GatewayService.exportLoads` |
+| `BLUPATH_CHUNK_DAYS` | max pickup-date range per request | `31` |
+| `LAKE_DAYS_BACK` / `LAKE_DAYS_FORWARD` | nightly refresh window around today | `60` / `30` |
 
-Test it on a PC before deploying (writes to a local `.lake/` folder):
+Test from a PC first (writes to a local `.lake/` folder, not SharePoint):
 
 ```bash
-cp local.settings.json.example local.settings.json   # then fill in the BLUPATH_* values
+cp local.settings.json.example local.settings.json   # then fill in BLUPATH_ACCESS_TOKEN
 pip install -r requirements.txt
 python run_local.py --local
 ```
@@ -91,7 +87,7 @@ Store the secrets in Key Vault, enable the function's managed identity, give it 
 "Key Vault Secrets User" role on the vault, then add the settings:
 
 ```bash
-az functionapp config appsettings set -n func-blupath-lake -g rg-blupath-lake --settings "BLUPATH_BASE_URL=https://..." "BLUPATH_API_KEY=@Microsoft.KeyVault(SecretUri=https://<vault>.vault.azure.net/secrets/blupath-api-key/)" "SP_CLIENT_SECRET=@Microsoft.KeyVault(SecretUri=https://<vault>.vault.azure.net/secrets/sp-client-secret/)" "SP_TENANT_ID=..." "SP_CLIENT_ID=..." "SP_HOSTNAME=yourcompany.sharepoint.com" "SP_SITE_PATH=/sites/DataLake"
+az functionapp config appsettings set -n func-blupath-lake -g rg-blupath-lake --settings "BLUPATH_ACCESS_TOKEN=@Microsoft.KeyVault(SecretUri=https://<vault>.vault.azure.net/secrets/blupath-access-token/)" "SP_CLIENT_SECRET=@Microsoft.KeyVault(SecretUri=https://<vault>.vault.azure.net/secrets/sp-client-secret/)" "SP_TENANT_ID=..." "SP_CLIENT_ID=..." "SP_HOSTNAME=yourcompany.sharepoint.com" "SP_SITE_PATH=/sites/DataLake"
 ```
 
 Deploy (requires Azure Functions Core Tools):
@@ -100,27 +96,30 @@ Deploy (requires Azure Functions Core Tools):
 func azure functionapp publish func-blupath-lake
 ```
 
-## 4. Run it manually or backfill history
+## 4. Load history (one-off backfill)
 
-The function also exposes an HTTP endpoint protected by a function key (Azure portal → the function → *Function Keys*):
-
-```bash
-curl -X POST "https://func-blupath-lake.azurewebsites.net/api/blupath/run?code=<function-key>"
-```
-
-To backfill history, run month by month to stay within the 10-minute function timeout:
+The nightly run only covers the last 60 days. To load the full financial year (as in Power BI),
+run a backfill by pickup date. Each call is one quarter, to stay within the 10-minute function timeout.
+Get the function key from the Azure portal (the function → *Function Keys*):
 
 ```bash
-curl -X POST "https://func-blupath-lake.azurewebsites.net/api/blupath/run?from=2026-01-01&to=2026-02-01&code=<function-key>"
+curl -X POST "https://func-blupath-lake.azurewebsites.net/api/blupath/run?from=2025-10-01&to=2025-12-31&code=<function-key>"
 ```
 
-For a large backfill you can also run `python run_local.py --from 2025-01-01 --to 2026-11-25` from a PC with the SP_* settings.
+Repeat for `2026-01-01`–`2026-03-31`, `2026-04-01`–`2026-06-30`, and so on. Alternatively, run it from a PC
+with the SP_* settings filled in:
+
+```bash
+python run_local.py --from 2025-10-01 --to 2026-09-30
+```
+
+Calling the endpoint without `from`/`to` runs the normal nightly window immediately.
 
 ## 5. Use the data
 
 - **Excel:** open `gold/loads_master.csv` from SharePoint.
-- **Power BI:** *Get Data → SharePoint folder*, filter to `gold/loads_master.parquet` (or the CSV).
-  Use the `curated/` daily files for history and trends.
+- **Power BI:** *Get Data → SharePoint folder*, filter to `gold/loads_master.parquet` (or the CSV) and
+  `gold/load_stops.parquet`, and relate them on `blupathId`. This replaces the direct API call in the current report.
 - **Monitoring:** failed runs are logged in Application Insights. Add an alert on function failures.
   `_state/run_log.csv` shows the load count for each night.
 

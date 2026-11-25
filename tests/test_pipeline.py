@@ -1,13 +1,14 @@
+import gzip
 import io
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import pandas as pd
 import pytest
 
 from blupath_lake.blupath_api import BlupathClient
 from blupath_lake.config import BlupathConfig
-from blupath_lake.pipeline import MASTER_CSV, MASTER_PARQUET, WATERMARK, run
+from blupath_lake.pipeline import MASTER, RUN_LOG, STOPS, default_window, run
 
 
 class MemStore:
@@ -22,92 +23,105 @@ class MemStore:
 
 
 class FakeResp:
-    def __init__(self, body, url="https://api.test/loads"):
-        self.body, self.status_code, self.url, self.text = body, 200, url, ""
+    def __init__(self, body, status=200):
+        self.body, self.status_code, self.text = body, status, json.dumps(body)
 
     def json(self):
         return self.body
 
 
 class FakeSession:
-    """Serves pages of loads; records every request."""
-    def __init__(self, pages):
-        self.pages, self.calls, self.headers, self.auth = pages, [], {}, None
+    """Returns the given loads, filtered by first-pickup date like the real export."""
+    def __init__(self, loads, status=200, body=None):
+        self.loads, self.status, self.body, self.calls, self.headers = loads, status, body, [], {}
 
-    def get(self, url, params=None, timeout=None):
-        self.calls.append((url, dict(params or {})))
-        return FakeResp(self.pages[len(self.calls) - 1], url)
-
-
-def cfg(**kw):
-    base = dict(base_url="https://api.test", loads_path="/loads", api_key="k", page_size=2)
-    base.update(kw)
-    return BlupathConfig(**base)
-
-
-def load(i, status="booked"):
-    return {"id": i, "status": status, "origin": {"city": "Durban"}, "stops": [{"seq": 1}], "weight": 1.5 * i}
+    def post(self, url, json=None, timeout=None):
+        self.calls.append(json)
+        if self.body is not None:
+            return FakeResp(self.body, self.status)
+        lo, hi = date.fromisoformat(json["dateFrom"]), date.fromisoformat(json["dateTo"])
+        out = [l for l in self.loads
+               if lo <= datetime.strptime(l["firstPickPlanStartDate"], "%d/%m/%Y").date() <= hi]
+        return FakeResp({"response": "ok", "result": out}, self.status)
 
 
-T0 = datetime(2026, 11, 25, 21, 0, tzinfo=timezone.utc)
+def load(n, pickup="20/11/2026", status="planned", lat=-29.1):
+    return {
+        "blupathId": 1000 + n, "TmsId": str(600000 + n), "id": f"CUSTOMER.{600000 + n}",
+        "loadStatus": status, "firstPickPlanStartDate": pickup, "firstPickLatitude": lat,
+        "billableRate": 100.5 * n, "hazmat": False, "pickupReferenceNumbers": ["REF1"],
+        "stopActualTimes": [
+            {"stopNumber": 1, "stopType": "pickup", "stopName": "A", "actualArrival": ""},
+            {"stopNumber": 2, "stopType": "delivery", "stopName": "B", "actualArrival": ""},
+        ],
+    }
 
 
-def test_page_pagination_and_auth():
-    s = FakeSession([{"data": [load(1), load(2)]}, {"data": [load(3)]}])
-    c = BlupathClient(cfg(), session=s)
-    out = list(c.iter_loads(T0, T0))
-    assert [r["id"] for r in out] == [1, 2, 3]
-    assert [p["page"] for _, p in s.calls] == [1, 2]
-    assert s.headers["Authorization"] == "Bearer k"
-    assert s.calls[0][1]["updatedFrom"] == "2026-11-25T21:00:00Z"
+def client(loads, **kw):
+    s = FakeSession(loads, **kw)
+    return BlupathClient(BlupathConfig(access_token="tok", chunk_days=7), session=s), s
 
 
-def test_cursor_and_next_link_pagination():
-    s = FakeSession([{"items": [load(1)], "meta": {"cursor": "abc"}}, {"items": [load(2)], "meta": {}}])
-    c = BlupathClient(cfg(pagination="cursor", records_key="items", cursor_key="meta.cursor"), session=s)
-    assert len(list(c.iter_loads(T0, T0))) == 2 and s.calls[1][1]["cursor"] == "abc"
-
-    s = FakeSession([{"data": [load(1)], "next": "/loads?page=2"}, {"data": [load(2)], "next": None}])
-    c = BlupathClient(cfg(pagination="next_link"), session=s)
-    assert len(list(c.iter_loads(T0, T0))) == 2 and s.calls[1][0] == "https://api.test/loads?page=2"
+NOW = datetime(2026, 11, 25, 21, 0, tzinfo=timezone.utc)  # 23:00 SAST
 
 
-def test_bare_list_response():
-    s = FakeSession([[load(1)]])
-    c = BlupathClient(cfg(pagination="none", records_key=""), session=s)
-    assert len(list(c.iter_loads(T0, T0))) == 1
+def test_request_shape_and_chunking():
+    c, s = client([load(1, "02/11/2026"), load(2, "20/11/2026")])
+    out = list(c.iter_loads(date(2026, 11, 1), date(2026, 11, 20)))
+    assert [r["blupathId"] for r in out] == [1001, 1002]
+    assert s.calls == [
+        {"dateFrom": "2026-11-01", "dateTo": "2026-11-07"},
+        {"dateFrom": "2026-11-08", "dateTo": "2026-11-14"},
+        {"dateFrom": "2026-11-15", "dateTo": "2026-11-20"},
+    ]
+    assert s.headers["accessToken"] == "tok"
+    assert s.headers["operation"] == "GatewayService.exportLoads"
 
 
-def test_run_builds_layers_and_upserts():
+def test_errors():
+    c, _ = client([], status=401, body={"error": "bad token"})
+    with pytest.raises(RuntimeError, match="access token"):
+        c.fetch(date(2026, 1, 1), date(2026, 1, 1))
+    c, _ = client([], body={"response": "error", "message": "x"})
+    with pytest.raises(RuntimeError, match="Unexpected"):
+        c.fetch(date(2026, 1, 1), date(2026, 1, 1))
+
+
+def test_default_window_is_sast_based():
+    # 22:30 UTC on 25 Nov is already 26 Nov in South Africa
+    f, t = default_window(datetime(2026, 11, 25, 22, 30, tzinfo=timezone.utc))
+    assert (f, t) == (date(2026, 9, 27), date(2026, 12, 26))
+
+
+def test_nightly_runs_upsert_and_partition():
     store = MemStore()
-    src = BlupathClient(cfg(pagination="none"), session=FakeSession([{"data": [load(1), load(2)]}]))
-    r1 = run(store, src, now=T0)
+    src, _ = client([load(1, "15/10/2026"), load(2)])
+    r1 = run(store, src, now=NOW)
     assert r1.fetched == 2 and r1.master_rows == 2
-    assert "curated/loads/2026/11/25/loads_2026-11-25.parquet" in store.files
-    assert any(p.startswith("raw/loads/2026/11/25/") for p in store.files)
+    assert "curated/loads/pickup_month=2026-10/loads.parquet" in store.files
+    assert "curated/loads/pickup_month=2026-11/loads.parquet" in store.files
+    raw = [p for p in store.files if p.startswith("raw/loads/2026/11/25/")]
+    assert len(raw) == 1 and json.loads(gzip.decompress(store.files[raw[0]]))["count"] == 2
 
-    # Next night: load 2 changes status, load 3 is new; window starts from watermark - lookback
-    nxt = datetime(2026, 11, 26, 21, 0, tzinfo=timezone.utc)
-    sess = FakeSession([{"data": [load(2, "delivered"), load(3)]}])
-    r2 = run(store, BlupathClient(cfg(pagination="none"), session=sess), now=nxt)
-    assert r2.window_start == datetime(2026, 11, 24, 21, 0, tzinfo=timezone.utc)
-    master = pd.read_parquet(io.BytesIO(store.files[MASTER_PARQUET])).set_index("id")
-    assert len(master) == 3 and master.loc["2", "status"] == "delivered"
-    assert master.loc["1", "origin_city"] == "Durban"
-    assert json.loads(master.loc["1", "stops"]) == [{"seq": 1}]
-    assert store.files[MASTER_CSV].startswith(b"\xef\xbb\xbf")
-    assert json.loads(store.files[WATERMARK])["window_end"] == nxt.isoformat()
+    # Next night: load 2 completed, latitude now arrives as a string; load 3 is new
+    src, _ = client([load(1, "15/10/2026"), load(2, status="completed", lat="-29.1"), load(3)])
+    r2 = run(store, src, now=datetime(2026, 11, 26, 21, 0, tzinfo=timezone.utc))
+    master = pd.read_parquet(io.BytesIO(store.files[MASTER + ".parquet"])).set_index("blupathId")
+    assert r2.master_rows == 3 and len(master) == 3
+    assert master.loc["1002", "loadStatus"] == "completed"
+    assert json.loads(master.loc["1001", "pickupReferenceNumbers"]) == ["REF1"]
+    nov = pd.read_parquet(io.BytesIO(store.files["curated/loads/pickup_month=2026-11/loads.parquet"]))
+    assert sorted(nov["blupathId"]) == ["1002", "1003"]
+    stops = pd.read_parquet(io.BytesIO(store.files[STOPS + ".parquet"]))
+    assert len(stops) == 6 and set(stops.columns) >= {"blupathId", "stopNumber", "stopType", "actualArrival"}
+    assert store.files[MASTER + ".csv"].startswith(b"\xef\xbb\xbf")
+    assert store.files[RUN_LOG].decode().count("\n") == 3
 
 
-def test_missing_id_field_fails_without_advancing_watermark():
+def test_backfill_range_and_empty():
     store = MemStore()
-    src = BlupathClient(cfg(pagination="none", id_field="loadNumber"), session=FakeSession([{"data": [load(1)]}]))
-    with pytest.raises(RuntimeError, match="BLUPATH_ID_FIELD"):
-        run(store, src, now=T0)
-    assert WATERMARK not in store.files
-
-
-def test_empty_day():
-    store = MemStore()
-    r = run(store, BlupathClient(cfg(pagination="none"), session=FakeSession([{"data": []}])), now=T0)
-    assert r.fetched == 0 and WATERMARK in store.files
+    src, s = client([load(1, "01/10/2025")])
+    r = run(store, src, date_from=date(2025, 10, 1), date_to=date(2025, 10, 3), now=NOW)
+    assert r.fetched == 1 and s.calls[0] == {"dateFrom": "2025-10-01", "dateTo": "2025-10-03"}
+    src, _ = client([])
+    assert run(MemStore(), src, now=NOW).fetched == 0

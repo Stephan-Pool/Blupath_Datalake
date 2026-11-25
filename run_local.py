@@ -2,7 +2,7 @@
 
     python run_local.py --local                     # write the lake to ./.lake instead of SharePoint
     python run_local.py                             # write to SharePoint (SP_* settings needed)
-    python run_local.py --from 2026-01-01 --to 2026-11-25   # backfill a range (UTC)
+    python run_local.py --from 2025-10-01 --to 2026-09-30   # backfill a pickup-date range
 
 Settings are read from environment variables or from local.settings.json if present.
 """
@@ -10,7 +10,7 @@ import argparse
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import date
 from pathlib import Path
 
 from blupath_lake.blupath_api import BlupathClient
@@ -46,14 +46,14 @@ def main():
             os.environ.setdefault(k, v)
 
     def parse(v):
-        return datetime.fromisoformat(v).replace(tzinfo=timezone.utc) if v else None
+        return date.fromisoformat(v) if v else None
 
     if args.local:
         store = LocalStore(Path(__file__).with_name(".lake"))
     else:
         from blupath_lake.sharepoint import SharePointStore
         store = SharePointStore(SharePointConfig.from_env())
-    r = run(store, BlupathClient(BlupathConfig.from_env()), start=parse(args.start), end=parse(args.end))
+    r = run(store, BlupathClient(BlupathConfig.from_env()), date_from=parse(args.start), date_to=parse(args.end))
     print(f"Fetched {r.fetched} loads; master now has {r.master_rows}. Files: {r.files}")
 
 
