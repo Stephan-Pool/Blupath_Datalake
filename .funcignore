@@ -1,0 +1,5 @@
+tests/
+.venv/
+.lake/
+run_local.py
+local.settings.json.example
