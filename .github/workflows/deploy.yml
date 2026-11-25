@@ -1,0 +1,79 @@
+name: Test and deploy
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -r requirements.txt pytest
+      - run: python -m pytest -q
+
+  deploy:
+    # Only from main, and only once the Azure settings exist (see README, "Automatic deployment").
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.AZURE_FUNCTIONAPP_NAME != ''
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # OpenID Connect login to Azure: no stored passwords
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy (Flex Consumption plan)
+        if: vars.AZURE_FUNCTIONAPP_PLAN != 'consumption'
+        uses: Azure/functions-action@v1
+        with:
+          app-name: ${{ vars.AZURE_FUNCTIONAPP_NAME }}
+          package: .
+          sku: flexconsumption
+          remote-build-python: true
+
+      - name: Deploy (Linux Consumption plan)
+        if: vars.AZURE_FUNCTIONAPP_PLAN == 'consumption'
+        uses: Azure/functions-action@v1
+        with:
+          app-name: ${{ vars.AZURE_FUNCTIONAPP_NAME }}
+          package: .
+          scm-do-build-during-deployment: true
+          enable-oryx-build: true
+
+      - name: Check the functions are registered
+        run: |
+          for attempt in 1 2 3 4 5 6; do
+            az functionapp function list --name "${{ vars.AZURE_FUNCTIONAPP_NAME }}" \
+              --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" --query "[].name" -o tsv > functions.txt || true
+            missing=""
+            for f in blupath_daily blupath_manual blupath_seed_history; do
+              grep -q "$f" functions.txt || missing="$missing $f"
+            done
+            [ -z "$missing" ] && { echo "All functions registered:"; cat functions.txt; exit 0; }
+            echo "Waiting for:$missing (attempt $attempt)"; sleep 20
+          done
+          echo "::error::Functions not found after deploy:$missing"; exit 1

@@ -90,11 +90,50 @@ Store the secrets in Key Vault, enable the function's managed identity, give it 
 az functionapp config appsettings set -n func-blupath-lake -g rg-blupath-lake --settings "BLUPATH_ACCESS_TOKEN=@Microsoft.KeyVault(SecretUri=https://<vault>.vault.azure.net/secrets/blupath-access-token/)" "SP_CLIENT_SECRET=@Microsoft.KeyVault(SecretUri=https://<vault>.vault.azure.net/secrets/sp-client-secret/)" "SP_TENANT_ID=..." "SP_CLIENT_ID=..." "SP_HOSTNAME=pooltransport.sharepoint.com" "SP_SITE_PATH=/sites/SNPool/IT"
 ```
 
-Deploy (requires Azure Functions Core Tools):
+Deploy, either automatically from GitHub (section 3b) or by hand with Azure Functions Core Tools:
 
 ```bash
 func azure functionapp publish func-blupath-lake
 ```
+
+## 3b. Automatic deployment from GitHub
+
+`.github/workflows/deploy.yml` runs the tests on every push and pull request. When `main` changes
+and the tests pass, it deploys to Azure, then checks that all three functions are registered.
+Deployment stays switched off until the `AZURE_FUNCTIONAPP_NAME` variable below is set, so the
+workflow can live in the repository before Azure exists.
+
+It signs in to Azure with OpenID Connect, so no Azure password is stored in GitHub. One-time setup:
+
+1. Create a deployment identity (separate from the SharePoint app) and note its `appId`:
+
+```bash
+az ad app create --display-name blupath-datalake-deploy --query appId -o tsv
+```
+
+```bash
+az ad sp create --id <appId>
+```
+
+2. Trust GitHub's `main` branch of this repository:
+
+```bash
+az ad app federated-credential create --id <appId> --parameters '{"name":"github-main","issuer":"https://token.actions.githubusercontent.com","subject":"repo:Stephan-Pool/blupath_datalake:ref:refs/heads/main","audiences":["api://AzureADTokenExchange"]}'
+```
+
+3. Allow it to deploy to the function app, and nothing else:
+
+```bash
+az role assignment create --assignee <appId> --role "Website Contributor" --scope $(az functionapp show -n func-blupath-lake -g rg-blupath-lake --query id -o tsv)
+```
+
+4. In GitHub, go to the repository → *Settings → Secrets and variables → Actions*:
+   - **Secrets:** `AZURE_CLIENT_ID` (the `appId`), `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`
+   - **Variables:** `AZURE_FUNCTIONAPP_NAME` (`func-blupath-lake`), `AZURE_RESOURCE_GROUP` (`rg-blupath-lake`),
+     and `AZURE_FUNCTIONAPP_PLAN` = `consumption` only if you used the Linux Consumption plan instead of Flex.
+
+To deploy without changing code: *Actions → Test and deploy → Run workflow* on `main`.
+The function's own settings (Blupath token, SharePoint IDs) stay in Azure and are not touched by deployments.
 
 ## 4. Load history (one-off)
 
