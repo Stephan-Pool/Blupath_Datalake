@@ -1,11 +1,11 @@
 # Blupath Loads Data Lake
 
 Pulls loads from the Blupath API every night at **23:00 South Africa time** and stores them in a
-layered data lake in a **SharePoint** document library. Runs as an **Azure Function**, so no PC
+layered data lake in the **Pool Transport Data Lake** folder on the SNPool/IT SharePoint site. Runs as an **Azure Function**, so no PC
 has to stay on.
 
 ```
-Blupath API ──(23:00 SAST, Azure Function timer)──► SharePoint: "Blupath Data Lake/"
+Blupath API ──(23:00 SAST, Azure Function timer)──► SharePoint (SNPool/IT): "Pool Transport Data Lake/Blupath/"
                                                      ├─ raw/loads/YYYY/MM/DD/loads_<time>.json.gz       exact API reply per run
                                                      ├─ curated/loads/pickup_month=YYYY-MM/loads.parquet loads by first-pickup month
                                                      ├─ gold/loads_master.parquet / .csv               one row per load (latest version)
@@ -53,17 +53,17 @@ python run_local.py --local
 2. **Certificates & secrets → New client secret.** Save the value; it goes into Key Vault.
 3. **API permissions → Microsoft Graph → Application → `Sites.Selected`**, then **Grant admin consent**.
    This lets the app reach only the sites you give it, not all of SharePoint.
-4. Create or choose a site, e.g. `https://yourcompany.sharepoint.com/sites/DataLake`. A SharePoint
-   admin grants the app write access to that site only:
+4. A SharePoint admin grants the app write access to the IT site only (it reads the history workbook
+   and writes the lake there):
 
 ```bash
 # PnP PowerShell
-Grant-PnPAzureADAppSitePermission -AppId <client-id> -DisplayName blupath-datalake -Site https://yourcompany.sharepoint.com/sites/DataLake -Permissions Write
+Grant-PnPAzureADAppSitePermission -AppId <client-id> -DisplayName blupath-datalake -Site https://pooltransport.sharepoint.com/sites/SNPool/IT -Permissions Write
 ```
 
-Settings: `SP_TENANT_ID`, `SP_CLIENT_ID`, `SP_CLIENT_SECRET`, `SP_HOSTNAME` (`yourcompany.sharepoint.com`),
-`SP_SITE_PATH` (`/sites/DataLake`), `SP_DRIVE_NAME` (library name, default `Documents`, which is
-"Shared Documents" in the browser), and `SP_ROOT_FOLDER` (default `Blupath Data Lake`).
+Settings: `SP_TENANT_ID`, `SP_CLIENT_ID`, `SP_CLIENT_SECRET`, `SP_HOSTNAME` (`pooltransport.sharepoint.com`),
+`SP_SITE_PATH` (`/sites/SNPool/IT`), `SP_DRIVE_NAME` (`Documents`, which is "Shared Documents" in the
+browser), and `SP_ROOT_FOLDER` (`Pool Transport Data Lake/Blupath`).
 
 ## 3. Deploy the Azure Function
 
@@ -87,7 +87,7 @@ Store the secrets in Key Vault, enable the function's managed identity, give it 
 "Key Vault Secrets User" role on the vault, then add the settings:
 
 ```bash
-az functionapp config appsettings set -n func-blupath-lake -g rg-blupath-lake --settings "BLUPATH_ACCESS_TOKEN=@Microsoft.KeyVault(SecretUri=https://<vault>.vault.azure.net/secrets/blupath-access-token/)" "SP_CLIENT_SECRET=@Microsoft.KeyVault(SecretUri=https://<vault>.vault.azure.net/secrets/sp-client-secret/)" "SP_TENANT_ID=..." "SP_CLIENT_ID=..." "SP_HOSTNAME=yourcompany.sharepoint.com" "SP_SITE_PATH=/sites/DataLake"
+az functionapp config appsettings set -n func-blupath-lake -g rg-blupath-lake --settings "BLUPATH_ACCESS_TOKEN=@Microsoft.KeyVault(SecretUri=https://<vault>.vault.azure.net/secrets/blupath-access-token/)" "SP_CLIENT_SECRET=@Microsoft.KeyVault(SecretUri=https://<vault>.vault.azure.net/secrets/sp-client-secret/)" "SP_TENANT_ID=..." "SP_CLIENT_ID=..." "SP_HOSTNAME=pooltransport.sharepoint.com" "SP_SITE_PATH=/sites/SNPool/IT"
 ```
 
 Deploy (requires Azure Functions Core Tools):
@@ -96,24 +96,37 @@ Deploy (requires Azure Functions Core Tools):
 func azure functionapp publish func-blupath-lake
 ```
 
-## 4. Load history (one-off backfill)
+## 4. Load history (one-off)
 
-The nightly run only covers the last 60 days. To load the full financial year (as in Power BI),
-run a backfill by pickup date. Each call is one quarter, to stay within the 10-minute function timeout.
-Get the function key from the Azure portal (the function → *Function Keys*):
+History comes from the workbook **`Pool Transport Data Lake/BP Raw data.xlsx`**, using sheets
+`011024-300925` (FY2025) and `011025-300926` (FY2026). The columns match the API, and the seed converts
+Excel dates, times and numbers to the API's formats so everything lands in the same tables.
+Rows are tagged in a `_source` column (`excel:<sheet>` or `api`).
+
+Rules:
+- If a load appears in both sheets, the later sheet wins.
+- **API data always wins over the workbook.** The seed only adds loads that aren't already in the lake,
+  and the nightly run overwrites any workbook row it fetches again. The seed is safe to run more than once.
+- The workbook has no stop-level times, so `load_stops` only covers loads from the API.
+- Both full sheets (about 53,000 loads) take about 45 seconds.
 
 ```bash
-curl -X POST "https://func-blupath-lake.azurewebsites.net/api/blupath/run?from=2025-10-01&to=2025-12-31&code=<function-key>"
+curl -X POST "https://func-blupath-lake.azurewebsites.net/api/blupath/seed-history?code=<function-key>"
 ```
 
-Repeat for `2026-01-01`–`2026-03-31`, `2026-04-01`–`2026-06-30`, and so on. Alternatively, run it from a PC
-with the SP_* settings filled in:
+Then close any gap between the end of the workbook (30 Sep 2026) and the start of the nightly window
+(60 days ago). This is only needed if you deploy after about 29 Nov 2026, but it's harmless either way:
 
 ```bash
-python run_local.py --from 2025-10-01 --to 2026-09-30
+curl -X POST "https://func-blupath-lake.azurewebsites.net/api/blupath/run?from=2026-10-01&to=2026-11-30&code=<function-key>"
 ```
 
-Calling the endpoint without `from`/`to` runs the normal nightly window immediately.
+The same can be run from a PC with the SP_* settings filled in: `python run_local.py --seed-history`.
+The settings are `HISTORY_FILE` (path from the library root) and `HISTORY_SHEETS` (comma-separated).
+When next year's sheet is added, put its name in `HISTORY_SHEETS` and run the seed again.
+
+Get the function key from the Azure portal (the function → *Function Keys*). Calling `/api/blupath/run`
+without `from`/`to` runs the normal nightly window immediately.
 
 ## 5. Use the data
 

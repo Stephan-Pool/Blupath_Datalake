@@ -59,7 +59,15 @@ class SharePointStore:
         return f"{GRAPH}/drives/{self.drive_id}/root:/{quote(full)}"
 
     def read(self, path: str) -> bytes | None:
-        r = self.s.get(self._item(path) + ":/content", timeout=120)
+        """Read a file inside the lake root folder."""
+        return self._get_content(self._item(path))
+
+    def read_from_library(self, path: str) -> bytes | None:
+        """Read a file by its path from the document library root (outside the lake folder)."""
+        return self._get_content(f"{GRAPH}/drives/{self.drive_id}/root:/{quote(path.strip('/'))}")
+
+    def _get_content(self, item_url: str) -> bytes | None:
+        r = self.s.get(item_url + ":/content", timeout=300)
         if r.status_code == 404:
             return None
         return self._check(r).content

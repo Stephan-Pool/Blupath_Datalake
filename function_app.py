@@ -5,6 +5,9 @@
 - blupath_manual: HTTP POST for a manual run or a backfill, protected by a function key.
     POST /api/blupath/run                                    -> normal nightly window
     POST /api/blupath/run?from=2025-10-01&to=2025-12-31      -> backfill a pickup-date range
+- blupath_seed_history: HTTP POST, one-off load of history from "BP Raw data.xlsx".
+    POST /api/blupath/seed-history                           -> sheets from HISTORY_SHEETS
+    POST /api/blupath/seed-history?sheets=011024-300925      -> specific sheet(s), comma-separated
 """
 import json
 import logging
@@ -13,7 +16,8 @@ from datetime import date
 import azure.functions as func
 
 from blupath_lake.blupath_api import BlupathClient
-from blupath_lake.config import BlupathConfig, SharePointConfig
+from blupath_lake.config import HISTORY_FILE, HISTORY_SHEETS, BlupathConfig, SharePointConfig
+from blupath_lake.history import seed
 from blupath_lake.pipeline import run
 from blupath_lake.sharepoint import SharePointStore
 
@@ -47,3 +51,18 @@ def blupath_manual(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as exc:  # reason to the caller; full trace goes to Application Insights
         logging.exception("Manual run failed")
         return func.HttpResponse(f"Run failed: {exc}", status_code=500)
+
+
+@app.route(route="blupath/seed-history", methods=["POST"], auth_level=func.AuthLevel.FUNCTION)
+def blupath_seed_history(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        sheets = [x.strip() for x in (req.params.get("sheets") or "").split(",") if x.strip()] or HISTORY_SHEETS
+        store = SharePointStore(SharePointConfig.from_env())
+        xlsx = store.read_from_library(HISTORY_FILE)
+        if xlsx is None:
+            return func.HttpResponse(f"History workbook not found: {HISTORY_FILE}", status_code=404)
+        result = seed(store, xlsx, sheets)
+        return func.HttpResponse(json.dumps(result, indent=2), mimetype="application/json")
+    except Exception as exc:
+        logging.exception("History seed failed")
+        return func.HttpResponse(f"History seed failed: {exc}", status_code=500)

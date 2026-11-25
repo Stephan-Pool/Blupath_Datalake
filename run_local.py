@@ -3,6 +3,8 @@
     python run_local.py --local                     # write the lake to ./.lake instead of SharePoint
     python run_local.py                             # write to SharePoint (SP_* settings needed)
     python run_local.py --from 2025-10-01 --to 2026-09-30   # backfill a pickup-date range
+    python run_local.py --seed-history              # load "BP Raw data.xlsx" from SharePoint
+    python run_local.py --local --seed-history "C:/path/BP Raw data.xlsx"   # from a local copy
 
 Settings are read from environment variables or from local.settings.json if present.
 """
@@ -37,6 +39,8 @@ def main():
     ap.add_argument("--local", action="store_true", help="write to ./.lake instead of SharePoint")
     ap.add_argument("--from", dest="start")
     ap.add_argument("--to", dest="end")
+    ap.add_argument("--seed-history", nargs="?", const="", default=None,
+                    help="load history workbook (optional local path; default: HISTORY_FILE on SharePoint)")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -53,6 +57,17 @@ def main():
     else:
         from blupath_lake.sharepoint import SharePointStore
         store = SharePointStore(SharePointConfig.from_env())
+    if args.seed_history is not None:
+        from blupath_lake.config import HISTORY_FILE, HISTORY_SHEETS
+        from blupath_lake.history import seed
+        if args.seed_history:
+            xlsx = Path(args.seed_history).read_bytes()
+        elif args.local:
+            raise SystemExit("With --local, give the workbook path: --seed-history <file.xlsx>")
+        else:
+            xlsx = store.read_from_library(HISTORY_FILE)
+        print(seed(store, xlsx, HISTORY_SHEETS))
+        return
     r = run(store, BlupathClient(BlupathConfig.from_env()), date_from=parse(args.start), date_to=parse(args.end))
     print(f"Fetched {r.fetched} loads; master now has {r.master_rows}. Files: {r.files}")
 

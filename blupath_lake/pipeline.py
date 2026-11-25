@@ -126,6 +126,7 @@ def run(store: Store, source: LoadSource, date_from: date | None = None,
         if id_field not in df.columns:
             raise RuntimeError(f"Load ID field '{id_field}' missing from Blupath data")
         df[id_field] = df[id_field].astype(str)
+        df["_source"] = "api"
         df["_ingested_at"] = stamp
         df = _stabilise(df)
         df["pickup_month"] = pd.to_datetime(_pickup_date(df["firstPickPlanStartDate"])).dt.strftime("%Y-%m").fillna("unknown")
