@@ -97,7 +97,7 @@ Store the secrets in Key Vault, enable the function's managed identity, give it 
 "Key Vault Secrets User" role on the vault, then add the settings:
 
 ```bash
-az functionapp config appsettings set -n func-blupath-lake -g rg-blupath-lake --settings "BLUPATH_ACCESS_TOKEN=@Microsoft.KeyVault(SecretUri=https://<vault>.vault.azure.net/secrets/blupath-access-token/)" "SP_CLIENT_SECRET=@Microsoft.KeyVault(SecretUri=https://<vault>.vault.azure.net/secrets/sp-client-secret/)" "SP_TENANT_ID=..." "SP_CLIENT_ID=..." "SP_HOSTNAME=pooltransport.sharepoint.com" "SP_SITE_PATH=/sites/SNPool/IT"
+az functionapp config appsettings set -n func-blupath-lake -g rg-blupath-lake --settings "BLUPATH_ACCESS_TOKEN=@Microsoft.KeyVault(SecretUri=https://<vault>.vault.azure.net/secrets/blupath-access-token/)" "SP_CLIENT_SECRET=@Microsoft.KeyVault(SecretUri=https://<vault>.vault.azure.net/secrets/sp-client-secret/)" "SP_TENANT_ID=..." "SP_CLIENT_ID=..." "SP_HOSTNAME=pooltransport.sharepoint.com" "SP_SITE_PATH=/sites/DataLake" "SP_ROOT_FOLDER=Blupath" "HISTORY_FILE=History/BP Raw data.xlsx"
 ```
 
 Deploy, either automatically from GitHub (section 3b) or by hand with Azure Functions Core Tools:
