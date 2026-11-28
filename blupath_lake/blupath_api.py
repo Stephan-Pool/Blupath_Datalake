@@ -52,6 +52,14 @@ class BlupathClient:
         if resp.status_code >= 400:
             raise RuntimeError(f"Blupath API error {resp.status_code}: {resp.text[:300]}")
         body = resp.json()
+        if isinstance(body, dict) and body.get("response") == "error":
+            msg = str((body.get("result") or {}).get("message", "")) if isinstance(body.get("result"), dict) else str(body.get("result"))
+            if "token" in msg.lower():
+                raise RuntimeError(
+                    f"Blupath rejected the access token ('{msg}'). Check the blupath-access-token secret in "
+                    "Key Vault, then restart the Function App so it reads the new value."
+                )
+            raise RuntimeError(f"Blupath returned an error: {msg or str(body)[:300]}")
         if not isinstance(body, dict) or body.get("response") != "ok" or not isinstance(body.get("result"), list):
             raise RuntimeError(f"Unexpected Blupath response: {str(body)[:300]}")
         return body["result"]

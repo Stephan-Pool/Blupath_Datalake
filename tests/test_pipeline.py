@@ -82,7 +82,13 @@ def test_errors():
     c, _ = client([], status=401, body={"error": "bad token"})
     with pytest.raises(RuntimeError, match="access token"):
         c.fetch(date(2026, 1, 1), date(2026, 1, 1))
-    c, _ = client([], body={"response": "error", "message": "x"})
+    c, _ = client([], body={"response": "error", "result": {"message": "invalid token"}})
+    with pytest.raises(RuntimeError, match="rejected the access token"):
+        c.fetch(date(2026, 1, 1), date(2026, 1, 1))
+    c, _ = client([], body={"response": "error", "result": {"message": "date range too large"}})
+    with pytest.raises(RuntimeError, match="Blupath returned an error: date range too large"):
+        c.fetch(date(2026, 1, 1), date(2026, 1, 1))
+    c, _ = client([], body={"something": "else"})
     with pytest.raises(RuntimeError, match="Unexpected"):
         c.fetch(date(2026, 1, 1), date(2026, 1, 1))
 
