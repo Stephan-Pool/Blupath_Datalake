@@ -125,10 +125,12 @@ az ad app create --display-name blupath-datalake-deploy --query appId -o tsv
 az ad sp create --id <appId>
 ```
 
-2. Trust GitHub's `main` branch of this repository:
+2. Trust GitHub's `main` branch of this repository. GitHub includes the owner and repository **ID numbers**
+   in the subject, and the subject must match exactly. If the login step fails with `AADSTS700213`,
+   copy the `subject claim` line from the failed log into this command:
 
 ```bash
-az ad app federated-credential create --id <appId> --parameters '{"name":"github-main","issuer":"https://token.actions.githubusercontent.com","subject":"repo:Stephan-Pool/blupath_datalake:ref:refs/heads/main","audiences":["api://AzureADTokenExchange"]}'
+az ad app federated-credential create --id <appId> --parameters '{"name":"github-main","issuer":"https://token.actions.githubusercontent.com","subject":"repo:Stephan-Pool@361043641/Blupath_Datalake@1471506761:ref:refs/heads/main","audiences":["api://AzureADTokenExchange"]}'
 ```
 
 3. Allow it to deploy to the function app, and nothing else:
