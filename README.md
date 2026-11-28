@@ -1,11 +1,11 @@
 # Blupath Loads Data Lake
 
 Pulls loads from the Blupath API every night at **23:00 South Africa time** and stores them in a
-layered data lake in the **Pool Transport Data Lake** folder on the SNPool/IT SharePoint site. Runs as an **Azure Function**, so no PC
+layered data lake on a dedicated SharePoint site, **Data Lake** (`/sites/DataLake`). Runs as an **Azure Function**, so no PC
 has to stay on.
 
 ```
-Blupath API ──(23:00 SAST, Azure Function timer)──► SharePoint (SNPool/IT): "Pool Transport Data Lake/Blupath/"
+Blupath API ──(23:00 SAST, Azure Function timer)──► SharePoint /sites/DataLake: "Documents/Blupath/"
                                                      ├─ raw/loads/YYYY/MM/DD/loads_<time>.json.gz       exact API reply per run
                                                      ├─ curated/loads/pickup_month=YYYY-MM/loads.parquet loads by first-pickup month
                                                      ├─ gold/loads_master.parquet / .csv               one row per load (latest version)
@@ -49,21 +49,31 @@ python run_local.py --local
 
 ## 2. Give the function access to SharePoint
 
-1. **Entra ID → App registrations → New registration**, named `blupath-datalake`. Note the tenant ID and client ID.
-2. **Certificates & secrets → New client secret.** Save the value; it goes into Key Vault.
-3. **API permissions → Microsoft Graph → Application → `Sites.Selected`**, then **Grant admin consent**.
-   This lets the app reach only the sites you give it, not all of SharePoint.
-4. A SharePoint admin grants the app write access to the IT site only (it reads the history workbook
-   and writes the lake there):
+The lake lives on its own SharePoint site so the app can reach **only that site**.
+(Graph's `Sites.Selected` permission can't be granted on a subsite: an attempt on `/sites/SNPool/IT`
+returned `notSupported`, and granting the parent site would have exposed all of SNPool.)
 
-```bash
-# PnP PowerShell
-Grant-PnPAzureADAppSitePermission -AppId <client-id> -DisplayName blupath-datalake -Site https://pooltransport.sharepoint.com/sites/SNPool/IT -Permissions Write
-```
+1. **Create the site:** a Communication site named **Data Lake** at `/sites/DataLake`
+   (SharePoint start page → *+ Create site*, or the admin center → *Sites → Active sites → + Create*).
+2. **Limit version history** (the pipeline overwrites the master files nightly):
+   *Documents → ⚙ → Library settings → Versioning settings*: **No time limit**, keep **10** major versions.
+3. **History workbook:** copy `BP Raw data.xlsx` into `Documents/History/`.
+4. **App registration** `blupath-datalake-sharepoint`, with a client secret stored in Key Vault and the
+   Microsoft Graph **application** permission **`Sites.Selected`** (ID `883ea226-0bf2-4a8f-9f9d-92c9162a727d`).
+   Then grant admin consent in the portal (*App registrations → API permissions → Grant admin consent*).
+   In Cloud Shell, `az ad app permission admin-consent` fails with an "MSI token audience" error.
+5. **Grant the app write access to the site** in [Graph Explorer](https://developer.microsoft.com/graph/graph-explorer),
+   signed in as a SharePoint or Global admin who has consented to `Sites.FullControl.All`
+   (*Modify permissions* only lists it once the POST URL below is in the address box):
+   - `GET https://graph.microsoft.com/v1.0/sites/pooltransport.sharepoint.com:/sites/DataLake?$select=id,webUrl`, then copy the `id`
+   - `POST https://graph.microsoft.com/v1.0/sites/<id>/permissions` with this body. A **201 Created** response means it worked:
+     ```json
+     {"roles": ["write"], "grantedToIdentities": [{"application": {"id": "<app client id>", "displayName": "blupath-datalake-sharepoint"}}]}
+     ```
 
-Settings: `SP_TENANT_ID`, `SP_CLIENT_ID`, `SP_CLIENT_SECRET`, `SP_HOSTNAME` (`pooltransport.sharepoint.com`),
-`SP_SITE_PATH` (`/sites/SNPool/IT`), `SP_DRIVE_NAME` (`Documents`, which is "Shared Documents" in the
-browser), and `SP_ROOT_FOLDER` (`Pool Transport Data Lake/Blupath`).
+Settings: `SP_TENANT_ID`, `SP_CLIENT_ID`, `SP_CLIENT_SECRET` (Key Vault), `SP_HOSTNAME` (`pooltransport.sharepoint.com`),
+`SP_SITE_PATH` (`/sites/DataLake`), `SP_DRIVE_NAME` (`Documents`), `SP_ROOT_FOLDER` (`Blupath`),
+and `HISTORY_FILE` (`History/BP Raw data.xlsx`).
 
 ## 3. Deploy the Azure Function
 
@@ -137,7 +147,7 @@ The function's own settings (Blupath token, SharePoint IDs) stay in Azure and ar
 
 ## 4. Load history (one-off)
 
-History comes from the workbook **`Pool Transport Data Lake/BP Raw data.xlsx`**, using sheets
+History comes from the workbook **`History/BP Raw data.xlsx`** on the Data Lake site, using sheets
 `011024-300925` (FY2025) and `011025-300926` (FY2026). The columns match the API, and the seed converts
 Excel dates, times and numbers to the API's formats so everything lands in the same tables.
 Rows are tagged in a `_source` column (`excel:<sheet>` or `api`).

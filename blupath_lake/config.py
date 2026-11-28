@@ -46,7 +46,7 @@ class SharePointConfig:
     hostname: str          # e.g. yourcompany.sharepoint.com
     site_path: str         # e.g. /sites/DataLake
     drive_name: str = "Documents"
-    root_folder: str = "Pool Transport Data Lake/Blupath"
+    root_folder: str = "Blupath"
 
     @classmethod
     def from_env(cls) -> "SharePointConfig":
@@ -57,7 +57,7 @@ class SharePointConfig:
             hostname=_env("SP_HOSTNAME", required=True),
             site_path=_env("SP_SITE_PATH", required=True),
             drive_name=_env("SP_DRIVE_NAME", "Documents"),
-            root_folder=_env("SP_ROOT_FOLDER", "Pool Transport Data Lake/Blupath").strip("/"),
+            root_folder=_env("SP_ROOT_FOLDER", "Blupath").strip("/"),
         )
 
 
@@ -68,5 +68,5 @@ DAYS_BACK = int(os.environ.get("LAKE_DAYS_BACK", "60"))
 DAYS_FORWARD = int(os.environ.get("LAKE_DAYS_FORWARD", "30"))
 
 # One-off history seed: workbook path from the document library root, and the sheets to load.
-HISTORY_FILE = os.environ.get("HISTORY_FILE", "Pool Transport Data Lake/BP Raw data.xlsx")
+HISTORY_FILE = os.environ.get("HISTORY_FILE", "History/BP Raw data.xlsx")
 HISTORY_SHEETS = [x.strip() for x in os.environ.get("HISTORY_SHEETS", "011024-300925,011025-300926").split(",") if x.strip()]

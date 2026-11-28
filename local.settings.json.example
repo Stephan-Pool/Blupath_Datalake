@@ -13,10 +13,10 @@
     "SP_CLIENT_ID": "<app registration client id>",
     "SP_CLIENT_SECRET": "<Key Vault reference in Azure>",
     "SP_HOSTNAME": "pooltransport.sharepoint.com",
-    "SP_SITE_PATH": "/sites/SNPool/IT",
+    "SP_SITE_PATH": "/sites/DataLake",
     "SP_DRIVE_NAME": "Documents",
-    "SP_ROOT_FOLDER": "Pool Transport Data Lake/Blupath",
-    "HISTORY_FILE": "Pool Transport Data Lake/BP Raw data.xlsx",
+    "SP_ROOT_FOLDER": "Blupath",
+    "HISTORY_FILE": "History/BP Raw data.xlsx",
     "HISTORY_SHEETS": "011024-300925,011025-300926"
   }
 }
